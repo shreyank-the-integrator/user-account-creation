@@ -5,6 +5,7 @@ import {
   clearBillingObjects,
   createCADSubscriptionWithCoupon,
   getCustomerCurrency,
+  updateConfig,
   type CustomerData,
   type ProcessResult
 } from '@/lib/stripe-utils'
@@ -61,32 +62,32 @@ async function processCustomer(customer: CustomerData): Promise<ProcessResult> {
   await clearBillingObjects(stripeCustomer.id)
   
   // Small delay
-  console.log(`\n⏳ Waiting 250ms for cancellations to process...`)
-  await new Promise(resolve => setTimeout(resolve, 250))
+  console.log(`\n⏳ Waiting 500ms for cancellations to process...`)
+  await new Promise(resolve => setTimeout(resolve, 500))
   
   // Create new CAD subscription
-  console.log(`\n5️⃣ STEP 5: Creating new CAD subscription...`)
+  console.log(`\n5️⃣ STEP 5: Creating new subscription...`)
   const subscription = await createCADSubscriptionWithCoupon(stripeCustomer.id)
   if (!subscription) {
-    console.log(`❌ RESULT: Failed to create CAD subscription`)
+    console.log(`❌ RESULT: Failed to create subscription`)
     return {
       kindeId,
       email,
       teamName,
       customerId: stripeCustomer.id,
       status: 'subscription_failed',
-      error: 'Failed to create CAD subscription'
+      error: 'Failed to create subscription'
     }
   }
-  console.log(`✅ RESULT: CAD subscription created - ${subscription.id}`)
+  console.log(`✅ RESULT: Subscription created - ${subscription.id}`)
   
   // Get new currency
   console.log(`\n6️⃣ STEP 6: Verifying new customer currency...`)
   const newCurrency = await getCustomerCurrency(stripeCustomer.id)
   
   // Wait for subscription to propagate
-  console.log(`\n⏳ Waiting 500ms for subscription to propagate...`)
-  await new Promise(resolve => setTimeout(resolve, 500))
+  console.log(`\n⏳ Waiting 2 seconds for subscription to propagate...`)
+  await new Promise(resolve => setTimeout(resolve, 2000))
   
   // Create team
   console.log(`\n7️⃣ STEP 7: Creating team...`)
@@ -140,7 +141,21 @@ export async function POST(request: NextRequest) {
     const body = await request.json()
     console.log(`📦 Raw request body:`, JSON.stringify(body, null, 2))
     
-    const { customers }: { customers: CustomerData[] } = body
+    const { customers, config }: { 
+      customers: CustomerData[], 
+      config?: {
+        priceId: string
+        couponId: string  
+        startDate: string
+        currency: string
+      }
+    } = body
+    
+    // Update configuration if provided
+    if (config) {
+      console.log(`⚙️ Updating configuration:`, config)
+      updateConfig(config.priceId, config.couponId, config.startDate, config.currency)
+    }
     
     console.log(`📊 Request received with ${customers?.length || 0} customers`)
     console.log(`📋 First customer (if exists):`, customers?.[0] ? JSON.stringify(customers[0], null, 2) : 'N/A')

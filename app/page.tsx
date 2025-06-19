@@ -2,10 +2,11 @@
 
 import React, { useState } from 'react'
 import { CSVUploader } from '@/components/CSVUploader'
+import { ConfigPanel } from '@/components/ConfigPanel'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
-import { Play, Download, CheckCircle, XCircle, AlertTriangle, Users, CreditCard, Building, Terminal } from 'lucide-react'
+import { Play, Download, CheckCircle, XCircle, AlertTriangle, Users, Building, Terminal } from 'lucide-react'
 import { downloadCSV } from '@/lib/utils'
 
 interface CustomerData {
@@ -39,6 +40,12 @@ export default function Home() {
   const [progress, setProgress] = useState(0)
   const [results, setResults] = useState<ProcessResult[]>([])
   const [processingError, setProcessingError] = useState<string | null>(null)
+  const [config, setConfig] = useState({
+    priceId: 'price_1R77HdDkAuZUHoK7l6ivkW2l',
+    couponId: '8OrZ17Rm',
+    startDate: '2025-06-15',
+    currency: 'cad'
+  })
 
   const handleDataLoaded = (data: CustomerData[]) => {
     console.log(`📊 CSV data loaded: ${data.length} customers`)
@@ -49,64 +56,68 @@ export default function Home() {
   }
 
   const handleStartProcessing = async () => {
-  if (csvData.length === 0) return
+    if (csvData.length === 0) return
 
-  console.log(`🚀 Starting processing of ${csvData.length} customers`)
-  console.log(`📋 Raw CSV data:`, csvData)
-  
-  // Transform the data to match the API interface
-  const transformedData = csvData.map(row => ({
-    kindeId: row['Kinde ID'],
-    email: row['Email'],
-    teamName: row['Team name']
-  }))
-  
-  console.log(`🔄 Transformed data:`, transformedData)
-  
-  setIsProcessing(true)
-  setProgress(0)
-  setResults([])
-  setProcessingError(null)
-
-  try {
-    console.log(`📡 Sending request to /api/process`)
+    console.log(`🚀 Starting processing of ${csvData.length} customers`)
+    console.log(`📋 Raw CSV data:`, csvData)
+    console.log(`⚙️ Using config:`, config)
     
-    const response = await fetch('/api/process', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ customers: transformedData }), // Use transformed data
-    })
+    // Transform the data to match the API interface
+    const transformedData = csvData.map(row => ({
+      kindeId: row['Kinde ID'],
+      email: row['Email'],
+      teamName: row['Team name']
+    }))
+    
+    console.log(`🔄 Transformed data:`, transformedData)
+    
+    setIsProcessing(true)
+    setProgress(0)
+    setResults([])
+    setProcessingError(null)
 
-    console.log(`📡 Response status: ${response.status}`)
+    try {
+      console.log(`📡 Sending request to /api/process`)
+      
+      const response = await fetch('/api/process', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          customers: transformedData,
+          config: config // Send config with request
+        }),
+      })
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error(`❌ API Error: ${response.status} - ${errorText}`)
-      throw new Error(`Processing failed: ${response.status} - ${errorText}`)
+      console.log(`📡 Response status: ${response.status}`)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error(`❌ API Error: ${response.status} - ${errorText}`)
+        throw new Error(`Processing failed: ${response.status} - ${errorText}`)
+      }
+
+      const data = await response.json()
+      console.log(`✅ Processing completed successfully`)
+      console.log(`📊 Results received: ${data.results?.length || 0} items`)
+      
+      setResults(data.results)
+      setProgress(100)
+      
+      // Auto-download report
+      console.log(`📥 Auto-downloading report...`)
+      setTimeout(() => {
+        handleDownloadReport(data.results)
+      }, 1000)
+      
+    } catch (error: any) {
+      console.error(`💥 Processing error:`, error)
+      setProcessingError(error.message)
+    } finally {
+      setIsProcessing(false)
     }
-
-    const data = await response.json()
-    console.log(`✅ Processing completed successfully`)
-    console.log(`📊 Results received: ${data.results?.length || 0} items`)
-    
-    setResults(data.results)
-    setProgress(100)
-    
-    // Auto-download report
-    console.log(`📥 Auto-downloading report...`)
-    setTimeout(() => {
-      handleDownloadReport(data.results)
-    }, 1000)
-    
-  } catch (error: any) {
-    console.error(`💥 Processing error:`, error)
-    setProcessingError(error.message)
-  } finally {
-    setIsProcessing(false)
   }
-}
 
   const handleDownloadReport = (resultsToDownload?: ProcessResult[]) => {
     const dataToDownload = resultsToDownload || results
@@ -139,7 +150,7 @@ export default function Home() {
 
     const date = new Date().toISOString().split('T')[0]
     const time = new Date().toISOString().split('T')[1].split('.')[0].replace(/:/g, '-')
-    downloadCSV(reportData, `cad_subscription_team_creation_${date}_${time}.csv`)
+    downloadCSV(reportData, `subscription_team_creation_${date}_${time}.csv`)
   }
 
   const getStatusIcon = (status: string) => {
@@ -192,7 +203,7 @@ export default function Home() {
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold mb-2">User Account Creation</h1>
           <p className="text-muted-foreground text-lg">
-            Create stripe customer accounts and teams for users
+            Create stripe customer accounts and teams for your users in bulk
           </p>
           <div className="flex items-center justify-center gap-2 mt-2 text-sm text-muted-foreground">
             <Terminal className="h-4 w-4" />
@@ -200,28 +211,11 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Configuration Info */}
-        <Card className="mb-8">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <CreditCard className="h-5 w-5" />
-              Configuration
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-              <div>
-                <strong>Start Date:</strong> June 15, 2025
-              </div>
-              <div>
-                <strong>Currency:</strong> CAD
-              </div>
-              <div>
-                <strong>Coupon:</strong> 100% off forever
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        {/* Configuration Panel */}
+        <ConfigPanel 
+          onConfigChange={setConfig}
+          disabled={isProcessing}
+        />
 
         {/* File Upload */}
         <div className="mb-8">

@@ -4,9 +4,124 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: '2023-10-16',
 })
 
-const PRICE_ID = process.env.STRIPE_PRICE_ID!
-const COUPON_ID = process.env.STRIPE_COUPON_ID!
-const SUBSCRIPTION_START_DATE = '2025-06-15'
+// Configuration types and functions
+export interface PriceOption {
+  id: string
+  nickname: string | null
+  currency: string
+  unit_amount: number | null
+  recurring: {
+    interval: string
+    interval_count: number
+  } | null
+  product: {
+    id: string
+    name: string
+  }
+}
+
+export interface CouponOption {
+  id: string
+  name: string | null
+  percent_off: number | null
+  amount_off: number | null
+  currency: string | null
+  duration: string
+  duration_in_months: number | null
+  max_redemptions: number | null
+  times_redeemed: number
+  valid: boolean
+}
+
+export interface ConfigOptions {
+  prices: PriceOption[]
+  coupons: CouponOption[]
+  currencies: string[]
+}
+
+export async function getConfigOptions(): Promise<ConfigOptions> {
+  try {
+    console.log(`📋 Fetching Stripe configuration options...`)
+    
+    // Fetch prices
+    console.log(`💰 Fetching prices...`)
+    const pricesResponse = await stripe.prices.list({
+      limit: 100,
+      active: true,
+      expand: ['data.product']
+    })
+    
+    const prices: PriceOption[] = pricesResponse.data.map(price => ({
+      id: price.id,
+      nickname: price.nickname,
+      currency: price.currency,
+      unit_amount: price.unit_amount,
+      recurring: price.recurring ? {
+        interval: price.recurring.interval,
+        interval_count: price.recurring.interval_count
+      } : null,
+      product: {
+        id: (price.product as Stripe.Product).id,
+        name: (price.product as Stripe.Product).name
+      }
+    }))
+    
+    console.log(`💰 Found ${prices.length} active prices`)
+    
+    // Fetch coupons
+    console.log(`🎫 Fetching coupons...`)
+    const couponsResponse = await stripe.coupons.list({
+      limit: 100
+    })
+    
+    const coupons: CouponOption[] = couponsResponse.data.map(coupon => ({
+      id: coupon.id,
+      name: coupon.name,
+      percent_off: coupon.percent_off,
+      amount_off: coupon.amount_off,
+      currency: coupon.currency,
+      duration: coupon.duration,
+      duration_in_months: coupon.duration_in_months,
+      max_redemptions: coupon.max_redemptions,
+      times_redeemed: coupon.times_redeemed,
+      valid: coupon.valid
+    }))
+    
+    console.log(`🎫 Found ${coupons.length} coupons`)
+    
+    // Get unique currencies from prices
+    const currencies = [...new Set(prices.map(p => p.currency))]
+    console.log(`💱 Available currencies from prices: ${currencies.join(', ')}`)
+    
+    // Log each price and its currency for debugging
+    prices.forEach(price => {
+      console.log(`   Price ${price.id}: ${price.currency.toUpperCase()} - ${price.product.name}`)
+    })
+    
+    return {
+      prices,
+      coupons: coupons.filter(c => c.valid), // Only return valid coupons
+      currencies
+    }
+  } catch (error: any) {
+    console.error(`💥 Error fetching config options:`, error)
+    throw error
+  }
+}
+
+// Configuration variables
+let PRICE_ID = process.env.STRIPE_PRICE_ID!
+let COUPON_ID = process.env.STRIPE_COUPON_ID!
+let SUBSCRIPTION_START_DATE = '2025-06-15'
+let SUBSCRIPTION_CURRENCY = 'cad'
+
+export function updateConfig(priceId: string, couponId: string, startDate: string, currency: string) {
+  PRICE_ID = priceId
+  COUPON_ID = couponId
+  SUBSCRIPTION_START_DATE = startDate
+  SUBSCRIPTION_CURRENCY = currency
+  console.log(`⚙️ Config updated: Price=${priceId}, Coupon=${couponId}, Date=${startDate}, Currency=${currency}`)
+}
 
 export interface CustomerData {
   kindeId: string
@@ -191,15 +306,16 @@ export async function clearBillingObjects(customerId: string): Promise<boolean> 
 
 export async function createCADSubscriptionWithCoupon(customerId: string): Promise<Stripe.Subscription | null> {
   try {
-    console.log(`💳 Creating CAD subscription for customer: ${customerId}`)
+    console.log(`💳 Creating subscription for customer: ${customerId}`)
     
     const startTimestamp = getSubscriptionStartTimestamp()
-    const nextJune15 = new Date('2026-06-15T00:00:00Z')
-    const nextJune15Timestamp = Math.floor(nextJune15.getTime() / 1000)
+    const nextYear = new Date(SUBSCRIPTION_START_DATE)
+    nextYear.setFullYear(nextYear.getFullYear() + 1)
+    const nextYearTimestamp = Math.floor(nextYear.getTime() / 1000)
     
-    console.log(`📅 Billing cycle anchor: ${nextJune15Timestamp} (June 15, 2026)`)
+    console.log(`📅 Billing cycle anchor: ${nextYearTimestamp} (${nextYear.toISOString().split('T')[0]})`)
     console.log(`🎫 Using coupon: ${COUPON_ID}`)
-    console.log(`💰 Currency: CAD`)
+    console.log(`💰 Currency: ${SUBSCRIPTION_CURRENCY.toUpperCase()}`)
     console.log(`📦 Price ID: ${PRICE_ID}`)
     
     const subscriptionParams = {
@@ -208,12 +324,12 @@ export async function createCADSubscriptionWithCoupon(customerId: string): Promi
         price: PRICE_ID,
         quantity: 1
       }],
-      currency: 'cad',
+      currency: SUBSCRIPTION_CURRENCY,
       discounts: [{
         coupon: COUPON_ID
       }],
       backdate_start_date: startTimestamp,
-      billing_cycle_anchor: nextJune15Timestamp,
+      billing_cycle_anchor: nextYearTimestamp,
       proration_behavior: 'none' as const,
       collection_method: 'charge_automatically' as const,
       automatic_tax: {
@@ -235,7 +351,7 @@ export async function createCADSubscriptionWithCoupon(customerId: string): Promi
     
     return subscription
   } catch (error: any) {
-    console.error(`💥 Failed to create CAD subscription for customer ${customerId}:`, error)
+    console.error(`💥 Failed to create subscription for customer ${customerId}:`, error)
     console.error(`   Error type: ${error.constructor.name}`)
     console.error(`   Error message: ${error.message}`)
     if (error.code) console.error(`   Error code: ${error.code}`)
