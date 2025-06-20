@@ -9,93 +9,65 @@ import {
   type CustomerData,
   type ProcessResult
 } from '@/lib/stripe-utils'
-import { createTeam } from '@/lib/team-api'
+import { createTeamWithRetry, setRegion } from '@/lib/team-api'
 
 async function processCustomer(customer: CustomerData): Promise<ProcessResult> {
   const { kindeId, email, teamName } = customer
   
-  console.log(`\n🔄 ===== PROCESSING CUSTOMER =====`)
-  console.log(`📧 Email: ${email}`)
-  console.log(`🆔 Kinde ID: ${kindeId}`)
-  console.log(`🏢 Team Name: ${teamName}`)
-  console.log(`🔍 Raw customer object:`, JSON.stringify(customer, null, 2))
-  console.log(`=====================================`)
-  
-  // Find customer by email
-  console.log(`\n1️⃣ STEP 1: Finding customer by email...`)
-  const stripeCustomer = await findCustomerByEmail(email)
-  if (!stripeCustomer) {
-    console.log(`❌ RESULT: Customer not found in Stripe`)
-    return {
-      kindeId,
-      email,
-      teamName,
-      status: 'customer_not_found',
-      error: 'Customer not found in Stripe'
+  try {
+    // Find customer by email
+    const stripeCustomer = await findCustomerByEmail(email)
+    if (!stripeCustomer) {
+      return {
+        kindeId,
+        email,
+        teamName,
+        status: 'customer_not_found',
+        error: 'Customer not found in Stripe'
+      }
     }
-  }
-  
-  console.log(`✅ RESULT: Customer found - ${stripeCustomer.id}`)
-  
-  // Get old currency
-  console.log(`\n2️⃣ STEP 2: Getting current customer currency...`)
-  const oldCurrency = await getCustomerCurrency(stripeCustomer.id)
-  
-  // Cancel active subscriptions
-  console.log(`\n3️⃣ STEP 3: Canceling active subscriptions...`)
-  const canceled = await cancelActiveSubscriptions(stripeCustomer.id)
-  if (!canceled) {
-    console.log(`❌ RESULT: Failed to cancel subscriptions`)
-    return {
-      kindeId,
-      email,
-      teamName,
-      customerId: stripeCustomer.id,
-      status: 'cancel_failed',
-      error: 'Failed to cancel existing subscriptions'
+    
+    // Get old currency from the customer object (no extra API call)
+    const oldCurrency = stripeCustomer.currency || null
+    
+    // Run cancellation and billing cleanup in parallel
+    const [canceled, _] = await Promise.all([
+      cancelActiveSubscriptions(stripeCustomer.id),
+      clearBillingObjects(stripeCustomer.id)
+    ])
+    
+    if (!canceled) {
+      return {
+        kindeId,
+        email,
+        teamName,
+        customerId: stripeCustomer.id,
+        oldCurrency: oldCurrency || undefined,
+        status: 'cancel_failed',
+        error: 'Failed to cancel existing subscriptions'
+      }
     }
-  }
-  console.log(`✅ RESULT: Subscriptions canceled successfully`)
-  
-  // Clear billing objects
-  console.log(`\n4️⃣ STEP 4: Clearing billing objects...`)
-  await clearBillingObjects(stripeCustomer.id)
-  
-  // Small delay
-  console.log(`\n⏳ Waiting 500ms for cancellations to process...`)
-  await new Promise(resolve => setTimeout(resolve, 500))
-  
-  // Create new CAD subscription
-  console.log(`\n5️⃣ STEP 5: Creating new subscription...`)
-  const subscription = await createCADSubscriptionWithCoupon(stripeCustomer.id)
-  if (!subscription) {
-    console.log(`❌ RESULT: Failed to create subscription`)
-    return {
-      kindeId,
-      email,
-      teamName,
-      customerId: stripeCustomer.id,
-      status: 'subscription_failed',
-      error: 'Failed to create subscription'
+    
+    // Short delay for cleanup to complete
+    await new Promise(resolve => setTimeout(resolve, 300))
+    
+    // Create new subscription
+    const subscription = await createCADSubscriptionWithCoupon(stripeCustomer.id)
+    if (!subscription) {
+      return {
+        kindeId,
+        email,
+        teamName,
+        customerId: stripeCustomer.id,
+        oldCurrency: oldCurrency || undefined,
+        status: 'subscription_failed',
+        error: 'Failed to create subscription'
+      }
     }
-  }
-  console.log(`✅ RESULT: Subscription created - ${subscription.id}`)
-  
-  // Get new currency
-  console.log(`\n6️⃣ STEP 6: Verifying new customer currency...`)
-  const newCurrency = await getCustomerCurrency(stripeCustomer.id)
-  
-  // Wait for subscription to propagate
-  console.log(`\n⏳ Waiting 2 seconds for subscription to propagate...`)
-  await new Promise(resolve => setTimeout(resolve, 2000))
-  
-  // Create team
-  console.log(`\n7️⃣ STEP 7: Creating team...`)
-  const teamResult = await createTeam(kindeId, teamName)
-  
-  if (!teamResult.success) {
-    console.log(`❌ RESULT: Team creation failed`)
-    console.log(`📝 Final status: Stripe subscription created but team creation failed`)
+    
+    // Get new currency from subscription (no extra API call)
+    const newCurrency = subscription.currency
+    
     return {
       kindeId,
       email,
@@ -107,40 +79,85 @@ async function processCustomer(customer: CustomerData): Promise<ProcessResult> {
       subscriptionCurrency: subscription.currency,
       startDate: '2025-06-15',
       coupon: process.env.STRIPE_COUPON_ID,
-      status: 'team_creation_failed',
-      error: `Stripe subscription created but team creation failed: ${teamResult.error}`,
-      teamError: teamResult.error,
-      teamStatus: teamResult.status,
-      teamResponseData: teamResult.responseData
+      status: 'success'
+    }
+    
+  } catch (error: any) {
+    console.error(`💥 Error processing ${email}:`, error.message)
+    return {
+      kindeId,
+      email,
+      teamName,
+      status: 'subscription_failed',
+      error: `Processing failed: ${error.message}`
+    }
+  }
+}
+
+async function processTeamCreation(results: ProcessResult[]): Promise<ProcessResult[]> {
+  console.log(`\n🏢 Creating teams for successful subscriptions...`)
+  
+  const successfulSubscriptions = results.filter(r => r.status === 'success')
+  
+  if (successfulSubscriptions.length === 0) {
+    return results
+  }
+  
+  console.log(`⏳ Waiting 10s for Stripe → Kinde sync...`)
+  await new Promise(resolve => setTimeout(resolve, 10000))
+  
+  // Process team creation in smaller batches
+  const teamBatchSize = 3
+  const updatedResults = [...results]
+  
+  for (let i = 0; i < successfulSubscriptions.length; i += teamBatchSize) {
+    const batch = successfulSubscriptions.slice(i, i + teamBatchSize)
+    
+    console.log(`🏢 Creating teams for batch ${Math.floor(i/teamBatchSize) + 1} (${batch.length} teams)`)
+    
+    const teamPromises = batch.map(async (result) => {
+      const teamResult = await createTeamWithRetry(result.kindeId, result.teamName, 2)
+      
+      if (teamResult.success) {
+        console.log(`✅ Team created: ${result.teamName}`)
+        return { ...result, teamId: teamResult.teamId, status: 'success' as const }
+      } else {
+        console.log(`❌ Team failed: ${result.teamName} - ${teamResult.error}`)
+        return {
+          ...result,
+          status: 'team_creation_failed' as const,
+          error: teamResult.error,
+          teamError: teamResult.error,
+          teamStatus: teamResult.status,
+          teamResponseData: teamResult.responseData
+        }
+      }
+    })
+    
+    const batchResults = await Promise.all(teamPromises)
+    
+    // Update the main results array
+    batchResults.forEach(updatedResult => {
+      const index = updatedResults.findIndex(r => r.kindeId === updatedResult.kindeId)
+      if (index !== -1) {
+        updatedResults[index] = updatedResult
+      }
+    })
+    
+    // Short delay between team batches
+    if (i + teamBatchSize < successfulSubscriptions.length) {
+      await new Promise(resolve => setTimeout(resolve, 2000))
     }
   }
   
-  console.log(`✅ RESULT: Team created successfully - ${teamResult.teamId}`)
-  console.log(`🎉 FINAL STATUS: Complete success!`)
-  
-  return {
-    kindeId,
-    email,
-    teamName,
-    customerId: stripeCustomer.id,
-    subscriptionId: subscription.id,
-    teamId: teamResult.teamId,
-    oldCurrency: oldCurrency || undefined,
-    newCurrency: newCurrency || undefined,
-    subscriptionCurrency: subscription.currency,
-    startDate: '2025-06-15',
-    coupon: process.env.STRIPE_COUPON_ID,
-    status: 'success'
-  }
+  return updatedResults
 }
 
 export async function POST(request: NextRequest) {
   try {
-    console.log(`🚀 ===== STARTING BATCH PROCESSING =====`)
+    console.log(`🚀 Starting batch processing...`)
     
     const body = await request.json()
-    console.log(`📦 Raw request body:`, JSON.stringify(body, null, 2))
-    
     const { customers, config }: { 
       customers: CustomerData[], 
       config?: {
@@ -148,110 +165,79 @@ export async function POST(request: NextRequest) {
         couponId: string  
         startDate: string
         currency: string
+        region: string
+        includeTeamCreation: boolean
       }
     } = body
     
-    // Update configuration if provided
+    // Update configuration
     if (config) {
-      console.log(`⚙️ Updating configuration:`, config)
+      console.log(`⚙️ Config: ${config.region} region, ${config.currency} currency, ${config.includeTeamCreation ? 'Stripe + Teams' : 'Stripe Only'}`)
       updateConfig(config.priceId, config.couponId, config.startDate, config.currency)
+      
+      if (config.region) {
+        setRegion(config.region)
+      }
     }
     
-    console.log(`📊 Request received with ${customers?.length || 0} customers`)
-    console.log(`📋 First customer (if exists):`, customers?.[0] ? JSON.stringify(customers[0], null, 2) : 'N/A')
-    
     if (!customers || !Array.isArray(customers)) {
-      console.log(`❌ Invalid request: customers data is not an array`)
-      console.log(`❌ Received type: ${typeof customers}`)
-      console.log(`❌ Received value:`, customers)
       return NextResponse.json(
         { error: 'Invalid customers data' },
         { status: 400 }
       )
     }
 
-    // Check each customer object structure
-    customers.forEach((customer, index) => {
-      console.log(`👤 Customer ${index + 1}:`)
-      console.log(`   - Object keys: ${Object.keys(customer)}`)
-      console.log(`   - Kinde ID: "${customer.kindeId}" (type: ${typeof customer.kindeId})`)
-      console.log(`   - Email: "${customer.email}" (type: ${typeof customer.email})`)
-      console.log(`   - Team Name: "${customer.teamName}" (type: ${typeof customer.teamName})`)
-      console.log(`   - Full object:`, JSON.stringify(customer, null, 2))
-    })
-
-    console.log(`📋 Environment check:`)
-    console.log(`   - STRIPE_SECRET_KEY: ${process.env.STRIPE_SECRET_KEY ? 'Set (starts with ' + process.env.STRIPE_SECRET_KEY.substring(0, 10) + '...)' : 'NOT SET'}`)
-    console.log(`   - STRIPE_PRICE_ID: ${process.env.STRIPE_PRICE_ID || 'NOT SET'}`)
-    console.log(`   - STRIPE_COUPON_ID: ${process.env.STRIPE_COUPON_ID || 'NOT SET'}`)
-    console.log(`   - TEAM_API_URL: ${process.env.TEAM_API_URL || 'NOT SET'}`)
-    console.log(`   - TEAM_API_TOKEN: ${process.env.TEAM_API_TOKEN ? 'Set (starts with ' + process.env.TEAM_API_TOKEN.substring(0, 20) + '...)' : 'NOT SET'}`)
+    console.log(`📊 Processing ${customers.length} customers`)
 
     const results: ProcessResult[] = []
-    const batchSize = 10
+    const batchSize = 8  // Optimized batch size for Stripe operations
     const totalBatches = Math.ceil(customers.length / batchSize)
     
-    console.log(`📦 Processing ${customers.length} customers in ${totalBatches} batches of ${batchSize}`)
+    console.log(`📊 Processing ${customers.length} customers in ${totalBatches} batches of ${batchSize}`)
     
-    // Process in batches
+    // Phase 1: Process Stripe operations in batches
     for (let i = 0; i < customers.length; i += batchSize) {
       const batchNumber = Math.floor(i / batchSize) + 1
       const batch = customers.slice(i, i + batchSize)
       
-      console.log(`\n📦 ===== BATCH ${batchNumber}/${totalBatches} =====`)
-      console.log(`📊 Processing customers ${i + 1}-${Math.min(i + batchSize, customers.length)} of ${customers.length}`)
-      console.log(`👥 Customers in this batch:`)
-      batch.forEach((customer, index) => {
-        console.log(`   ${i + index + 1}. ${customer.teamName} (${customer.email})`)
-      })
+      console.log(`\n📦 Stripe Batch ${batchNumber}/${totalBatches} (${batch.length} customers)`)
       
       const batchPromises = batch.map(customer => processCustomer(customer))
       const batchResults = await Promise.all(batchPromises)
       
       results.push(...batchResults)
       
-      console.log(`\n📊 Batch ${batchNumber} Results:`)
       const batchSuccess = batchResults.filter(r => r.status === 'success').length
-      const batchPartial = batchResults.filter(r => r.status === 'team_creation_failed').length
-      const batchFailed = batchResults.filter(r => r.status !== 'success' && r.status !== 'team_creation_failed').length
+      const batchFailed = batchResults.filter(r => r.status !== 'success').length
       
-      console.log(`   ✅ Success: ${batchSuccess}`)
-      console.log(`   ⚠️  Partial: ${batchPartial}`)
-      console.log(`   ❌ Failed: ${batchFailed}`)
+      console.log(`📊 Stripe batch results: ${batchSuccess} success, ${batchFailed} failed`)
       
-      // Shorter wait between batches
+      // Short wait between Stripe batches
       if (i + batchSize < customers.length) {
-        console.log(`⏳ Waiting 500ms before next batch...`)
-        await new Promise(resolve => setTimeout(resolve, 500))
+        console.log(`⏳ Waiting 1s before next Stripe batch...`)
+        await new Promise(resolve => setTimeout(resolve, 1000))
       }
     }
     
-    console.log(`\n🎉 ===== PROCESSING COMPLETE =====`)
-    const totalSuccess = results.filter(r => r.status === 'success').length
-    const totalPartial = results.filter(r => r.status === 'team_creation_failed').length
-    const totalFailed = results.filter(r => r.status !== 'success' && r.status !== 'team_creation_failed').length
+    // Phase 2: Process team creation for successful subscriptions (if enabled)
+    let finalResults = results
+    if (config?.includeTeamCreation) {
+      finalResults = await processTeamCreation(results)
+    } else {
+      console.log(`\n⏭️ Skipping team creation (Stripe-only mode)`)
+    }
     
-    console.log(`📊 Final Results:`)
-    console.log(`   ✅ Total Success: ${totalSuccess}`)
-    console.log(`   ⚠️  Total Partial: ${totalPartial}`)
-    console.log(`   ❌ Total Failed: ${totalFailed}`)
-    console.log(`   📋 Total Processed: ${results.length}`)
+    const totalSuccess = finalResults.filter(r => r.status === 'success').length
+    const totalPartial = finalResults.filter(r => r.status === 'team_creation_failed').length
+    const totalFailed = finalResults.filter(r => r.status !== 'success' && r.status !== 'team_creation_failed').length
     
-    console.log(`\n📋 Detailed Results Summary:`)
-    results.forEach((result, index) => {
-      const status = result.status === 'success' ? '✅' : result.status === 'team_creation_failed' ? '⚠️' : '❌'
-      console.log(`   ${index + 1}. ${status} ${result.teamName} (${result.email}) - ${result.status}`)
-      if (result.error) {
-        console.log(`      Error: ${result.error}`)
-      }
-    })
+    console.log(`\n🎉 Processing complete!`)
+    console.log(`📊 Final: ${totalSuccess} success, ${totalPartial} partial, ${totalFailed} failed`)
+    console.log(`🌍 Mode: ${config?.includeTeamCreation ? 'Stripe + Teams' : 'Stripe Only'} | Region: ${config?.region || 'ca (default)'}`)
     
-    return NextResponse.json({ results })
+    return NextResponse.json({ results: finalResults })
   } catch (error: any) {
-    console.error(`💥 ===== FATAL ERROR IN PROCESSING =====`)
-    console.error(`Error type: ${error.constructor.name}`)
-    console.error(`Error message: ${error.message}`)
-    console.error(`Error stack:`, error.stack)
+    console.error(`💥 Fatal error:`, error.message)
     
     return NextResponse.json(
       { error: 'Internal server error' },

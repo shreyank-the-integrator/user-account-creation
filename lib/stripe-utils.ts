@@ -4,6 +4,32 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: '2023-10-16',
 })
 
+// Rate limit handling utility
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  maxRetries: number = 3,
+  baseDelay: number = 1000
+): Promise<T> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation()
+    } catch (error: any) {
+      // Check if it's a rate limit error
+      if (error.type === 'StripeRateLimitError' && attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt - 1) // Exponential backoff
+        console.log(`⏳ Rate limited, waiting ${delay}ms before retry ${attempt + 1}/${maxRetries}`)
+        await new Promise(resolve => setTimeout(resolve, delay))
+        continue
+      }
+      
+      // Re-throw if not rate limit error or max retries reached
+      throw error
+    }
+  }
+  
+  throw new Error('Max retries reached')
+}
+
 // Configuration types and functions
 export interface PriceOption {
   id: string
@@ -43,13 +69,14 @@ export async function getConfigOptions(): Promise<ConfigOptions> {
   try {
     console.log(`📋 Fetching Stripe configuration options...`)
     
-    // Fetch prices
-    console.log(`💰 Fetching prices...`)
-    const pricesResponse = await stripe.prices.list({
-      limit: 100,
-      active: true,
-      expand: ['data.product']
-    })
+    // Fetch prices with rate limit handling
+    const pricesResponse = await withRetry(() => 
+      stripe.prices.list({
+        limit: 100,
+        active: true,
+        expand: ['data.product']
+      })
+    )
     
     const prices: PriceOption[] = pricesResponse.data.map(price => ({
       id: price.id,
@@ -66,13 +93,10 @@ export async function getConfigOptions(): Promise<ConfigOptions> {
       }
     }))
     
-    console.log(`💰 Found ${prices.length} active prices`)
-    
-    // Fetch coupons
-    console.log(`🎫 Fetching coupons...`)
-    const couponsResponse = await stripe.coupons.list({
-      limit: 100
-    })
+    // Fetch coupons with rate limit handling
+    const couponsResponse = await withRetry(() => 
+      stripe.coupons.list({ limit: 100 })
+    )
     
     const coupons: CouponOption[] = couponsResponse.data.map(coupon => ({
       id: coupon.id,
@@ -87,20 +111,11 @@ export async function getConfigOptions(): Promise<ConfigOptions> {
       valid: coupon.valid
     }))
     
-    console.log(`🎫 Found ${coupons.length} coupons`)
-    
-    // Get unique currencies from prices
     const currencies = [...new Set(prices.map(p => p.currency))]
-    console.log(`💱 Available currencies from prices: ${currencies.join(', ')}`)
-    
-    // Log each price and its currency for debugging
-    prices.forEach(price => {
-      console.log(`   Price ${price.id}: ${price.currency.toUpperCase()} - ${price.product.name}`)
-    })
     
     return {
       prices,
-      coupons: coupons.filter(c => c.valid), // Only return valid coupons
+      coupons: coupons.filter(c => c.valid),
       currencies
     }
   } catch (error: any) {
@@ -150,173 +165,127 @@ export interface ProcessResult {
 
 function getSubscriptionStartTimestamp(): number {
   const timestamp = Math.floor(new Date(SUBSCRIPTION_START_DATE + 'T00:00:00Z').getTime() / 1000)
-  console.log(`🕐 Subscription start timestamp: ${timestamp} (${SUBSCRIPTION_START_DATE})`)
   return timestamp
 }
 
 export async function findCustomerByEmail(email: string): Promise<Stripe.Customer | null> {
   try {
-    console.log(`🔍 Searching for customer with email: "${email}"`)
-    
-    // Log the exact search query being used
-    const searchQuery = `email:'${email}'`
-    console.log(`📝 Stripe search query: ${searchQuery}`)
-    
-    const customers = await stripe.customers.search({
-      query: searchQuery,
-      limit: 1
-    })
-    
-    console.log(`📊 Search results: Found ${customers.data.length} customers`)
+    const customers = await withRetry(() => 
+      stripe.customers.search({
+        query: `email:'${email}'`,
+        limit: 1
+      })
+    )
     
     if (customers.data.length > 0) {
       const customer = customers.data[0]
-      console.log(`✅ Customer found:`)
-      console.log(`   - ID: ${customer.id}`)
-      console.log(`   - Email: ${customer.email}`)
-      console.log(`   - Name: ${customer.name || 'N/A'}`)
-      console.log(`   - Currency: ${customer.currency || 'none'}`)
-      console.log(`   - Created: ${new Date(customer.created * 1000).toISOString()}`)
+      console.log(`✅ Found customer: ${customer.id}`)
       return customer
     } else {
-      console.log(`❌ No customer found with email: "${email}"`)
-      
-      // Let's try a broader search to see if there are similar emails
-      try {
-        console.log(`🔍 Attempting broader search...`)
-        const broadSearch = await stripe.customers.list({
-          email: email,
-          limit: 5
-        })
-        console.log(`📊 Broad search results: Found ${broadSearch.data.length} customers with list method`)
-        
-        if (broadSearch.data.length > 0) {
-          console.log(`📋 Similar customers found:`)
-          broadSearch.data.forEach((c, index) => {
-            console.log(`   ${index + 1}. ID: ${c.id}, Email: ${c.email}`)
-          })
-        }
-      } catch (broadError) {
-        console.log(`⚠️ Broad search failed:`, broadError)
-      }
-      
+      console.log(`❌ No customer found with email: ${email}`)
       return null
     }
   } catch (error: any) {
-    console.error(`💥 Error searching for customer "${email}":`, error)
-    console.error(`   Error type: ${error.constructor.name}`)
-    console.error(`   Error message: ${error.message}`)
-    if (error.code) console.error(`   Error code: ${error.code}`)
-    if (error.type) console.error(`   Error type: ${error.type}`)
+    console.error(`💥 Error searching for customer ${email}:`, error.message)
     return null
   }
 }
 
 export async function cancelActiveSubscriptions(customerId: string): Promise<boolean> {
   try {
-    console.log(`🗂️ Fetching subscriptions for customer: ${customerId}`)
-    
-    const subscriptions = await stripe.subscriptions.list({
-      customer: customerId,
-      status: 'all'
-    })
-    
-    console.log(`📊 Found ${subscriptions.data.length} total subscriptions`)
-    
-    const activeSubscriptions = subscriptions.data.filter(sub => 
-      sub.status === 'active' || sub.status === 'trialing' || sub.status === 'past_due'
+    const subscriptions = await withRetry(() => 
+      stripe.subscriptions.list({
+        customer: customerId,
+        status: 'active', // Only get active ones
+        limit: 10 // Limit to reduce response size
+      })
     )
     
-    console.log(`📊 Active subscriptions to cancel: ${activeSubscriptions.length}`)
-    
-    if (activeSubscriptions.length === 0) {
-      console.log(`✅ No active subscriptions to cancel`)
+    if (subscriptions.data.length === 0) {
       return true
     }
     
-    console.log(`🔄 Canceling ${activeSubscriptions.length} active subscription(s)...`)
-    
-    for (const subscription of activeSubscriptions) {
-      console.log(`   🗑️ Canceling subscription ${subscription.id} (status: ${subscription.status}, currency: ${subscription.currency})`)
-      await stripe.subscriptions.cancel(subscription.id, {
-        prorate: false
+    // Cancel all active subscriptions in parallel (they're different objects)
+    const cancelPromises = subscriptions.data.map(subscription => 
+      withRetry(() => 
+        stripe.subscriptions.cancel(subscription.id, { prorate: false })
+      ).then(() => {
+        console.log(`✅ Canceled subscription: ${subscription.id}`)
+        return true
+      }).catch((error) => {
+        console.log(`⚠️ Failed to cancel ${subscription.id}: ${error.message}`)
+        return false
       })
-      console.log(`   ✅ Successfully canceled ${subscription.id}`)
-    }
+    )
     
-    console.log(`✅ All active subscriptions canceled successfully`)
-    return true
+    const results = await Promise.all(cancelPromises)
+    return results.every(r => r) // Return true only if all succeeded
   } catch (error: any) {
-    console.error(`💥 Error canceling subscriptions for customer ${customerId}:`, error)
-    console.error(`   Error details:`, error.message)
+    console.error(`💥 Error canceling subscriptions for ${customerId}:`, error.message)
     return false
   }
 }
 
 export async function clearBillingObjects(customerId: string): Promise<boolean> {
   try {
-    console.log(`🧹 Clearing billing objects for customer: ${customerId}`)
+    // Run invoice and invoice item cleanup in parallel (different endpoints)
+    const [invoiceCleanup, invoiceItemCleanup] = await Promise.all([
+      // Void open invoices
+      withRetry(() => 
+        stripe.invoices.list({
+          customer: customerId,
+          status: 'open',
+          limit: 10
+        })
+      ).then(async (invoices) => {
+        if (invoices.data.length === 0) return true
+        
+        const voidPromises = invoices.data.map(invoice =>
+          withRetry(() => stripe.invoices.voidInvoice(invoice.id)).catch((error) => {
+            console.log(`⚠️ Could not void invoice ${invoice.id}: ${error.message}`)
+            return false
+          })
+        )
+        
+        await Promise.all(voidPromises)
+        return true
+      }),
+      
+      // Delete pending invoice items
+      withRetry(() => 
+        stripe.invoiceItems.list({
+          customer: customerId,
+          pending: true as any,
+          limit: 10
+        })
+      ).then(async (invoiceItems) => {
+        if (invoiceItems.data.length === 0) return true
+        
+        const deletePromises = invoiceItems.data.map(item =>
+          withRetry(() => stripe.invoiceItems.del(item.id)).catch((error) => {
+            console.log(`⚠️ Could not delete invoice item ${item.id}: ${error.message}`)
+            return false
+          })
+        )
+        
+        await Promise.all(deletePromises)
+        return true
+      })
+    ])
     
-    // Void open invoices
-    console.log(`📄 Fetching open invoices...`)
-    const invoices = await stripe.invoices.list({
-      customer: customerId,
-      status: 'open'
-    })
-    
-    console.log(`📊 Found ${invoices.data.length} open invoices`)
-    
-    for (const invoice of invoices.data) {
-      try {
-        console.log(`   🗑️ Voiding invoice ${invoice.id}`)
-        await stripe.invoices.voidInvoice(invoice.id)
-        console.log(`   ✅ Voided invoice ${invoice.id}`)
-      } catch (error: any) {
-        console.log(`   ⚠️ Could not void invoice ${invoice.id}: ${error.message}`)
-      }
-    }
-    
-    // Delete pending invoice items
-    console.log(`📝 Fetching pending invoice items...`)
-    const invoiceItems = await stripe.invoiceItems.list({
-      customer: customerId,
-      pending: true as any
-    })
-    
-    console.log(`📊 Found ${invoiceItems.data.length} pending invoice items`)
-    
-    for (const item of invoiceItems.data) {
-      try {
-        console.log(`   🗑️ Deleting invoice item ${item.id}`)
-        await stripe.invoiceItems.del(item.id)
-        console.log(`   ✅ Deleted invoice item ${item.id}`)
-      } catch (error: any) {
-        console.log(`   ⚠️ Could not delete invoice item ${item.id}: ${error.message}`)
-      }
-    }
-    
-    console.log(`✅ Billing objects cleared successfully`)
-    return true
+    return invoiceCleanup && invoiceItemCleanup
   } catch (error: any) {
-    console.error(`💥 Error clearing billing objects for customer ${customerId}:`, error)
-    console.error(`   Error details:`, error.message)
+    console.error(`💥 Error clearing billing objects for ${customerId}:`, error.message)
     return false
   }
 }
 
 export async function createCADSubscriptionWithCoupon(customerId: string): Promise<Stripe.Subscription | null> {
   try {
-    console.log(`💳 Creating subscription for customer: ${customerId}`)
-    
     const startTimestamp = getSubscriptionStartTimestamp()
     const nextYear = new Date(SUBSCRIPTION_START_DATE)
     nextYear.setFullYear(nextYear.getFullYear() + 1)
     const nextYearTimestamp = Math.floor(nextYear.getTime() / 1000)
-    
-    console.log(`📅 Billing cycle anchor: ${nextYearTimestamp} (${nextYear.toISOString().split('T')[0]})`)
-    console.log(`🎫 Using coupon: ${COUPON_ID}`)
-    console.log(`💰 Currency: ${SUBSCRIPTION_CURRENCY.toUpperCase()}`)
-    console.log(`📦 Price ID: ${PRICE_ID}`)
     
     const subscriptionParams = {
       customer: customerId,
@@ -337,39 +306,25 @@ export async function createCADSubscriptionWithCoupon(customerId: string): Promi
       }
     }
     
-    console.log(`🔄 Creating subscription with params:`, JSON.stringify(subscriptionParams, null, 2))
+    const subscription = await withRetry(() => 
+      stripe.subscriptions.create(subscriptionParams)
+    )
     
-    const subscription = await stripe.subscriptions.create(subscriptionParams)
-    
-    console.log(`✅ Subscription created successfully:`)
-    console.log(`   - ID: ${subscription.id}`)
-    console.log(`   - Status: ${subscription.status}`)
-    console.log(`   - Currency: ${subscription.currency}`)
-    console.log(`   - Current period start: ${new Date(subscription.current_period_start * 1000).toISOString()}`)
-    console.log(`   - Current period end: ${new Date(subscription.current_period_end * 1000).toISOString()}`)
-    console.log(`   - Items count: ${subscription.items.data.length}`)
-    
+    console.log(`✅ Created subscription: ${subscription.id}`)
     return subscription
   } catch (error: any) {
-    console.error(`💥 Failed to create subscription for customer ${customerId}:`, error)
-    console.error(`   Error type: ${error.constructor.name}`)
-    console.error(`   Error message: ${error.message}`)
-    if (error.code) console.error(`   Error code: ${error.code}`)
-    if (error.type) console.error(`   Stripe error type: ${error.type}`)
-    if (error.param) console.error(`   Error param: ${error.param}`)
+    console.error(`💥 Failed to create subscription for ${customerId}:`, error.message)
     return null
   }
 }
 
 export async function getCustomerCurrency(customerId: string): Promise<string | null> {
   try {
-    console.log(`💱 Getting currency for customer: ${customerId}`)
-    const customer = await stripe.customers.retrieve(customerId)
+    const customer = await withRetry(() => stripe.customers.retrieve(customerId))
     const currency = (customer as Stripe.Customer).currency || null
-    console.log(`💱 Customer currency: ${currency || 'none'}`)
     return currency
   } catch (error: any) {
-    console.error(`💥 Error getting customer currency for ${customerId}:`, error)
+    console.error(`💥 Error getting customer currency for ${customerId}:`, error.message)
     return null
   }
 }

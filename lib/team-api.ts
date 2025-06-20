@@ -1,7 +1,15 @@
 import axios from 'axios'
 
-const TEAM_API_URL = process.env.TEAM_API_URL!
 const TEAM_API_TOKEN = process.env.TEAM_API_TOKEN!
+
+// Region mapping
+const REGION_URLS = {
+  ca: 'https://ca.api.heidihealth.com/api/v2/ml-scribe/internal-admin/teams/',
+  us: 'https://us.api.heidihealth.com/api/v2/ml-scribe/internal-admin/teams/',
+  au: 'https://au.api.heidihealth.com/api/v2/ml-scribe/internal-admin/teams/',
+  eu: 'https://eu.api.heidihealth.com/api/v2/ml-scribe/internal-admin/teams/',
+  uk: 'https://uk.api.heidihealth.com/api/v2/ml-scribe/internal-admin/teams/'
+}
 
 export interface TeamCreationResult {
   success: boolean
@@ -11,13 +19,34 @@ export interface TeamCreationResult {
   responseData?: any
 }
 
+// Dynamic region configuration
+let currentRegion = 'ca' // Default to Canada
+
+export function setRegion(region: string) {
+  if (region in REGION_URLS) {
+    currentRegion = region
+    console.log(`🌍 Region set to: ${region}`)
+  } else {
+    console.error(`❌ Invalid region: ${region}. Valid regions: ${Object.keys(REGION_URLS).join(', ')}`)
+  }
+}
+
+export function getCurrentRegionUrl(): string {
+  return REGION_URLS[currentRegion as keyof typeof REGION_URLS]
+}
+
+function getAuthHeader(): string {
+  if (TEAM_API_TOKEN.startsWith('Bearer ')) {
+    return TEAM_API_TOKEN
+  } else {
+    return `Bearer ${TEAM_API_TOKEN}`
+  }
+}
+
 export async function createTeam(kindeId: string, teamName: string): Promise<TeamCreationResult> {
   try {
-    console.log(`🏢 Creating team via API...`)
-    console.log(`   - Kinde ID: ${kindeId}`)
-    console.log(`   - Team Name: ${teamName}`)
-    console.log(`   - API URL: ${TEAM_API_URL}`)
-    console.log(`   - Token starts with: ${TEAM_API_TOKEN.substring(0, 20)}...`)
+    const currentUrl = getCurrentRegionUrl()
+    const authHeader = getAuthHeader()
     
     const payload = {
       owner_kinde_id: kindeId,
@@ -30,48 +59,108 @@ export async function createTeam(kindeId: string, teamName: string): Promise<Tea
       subscribed_plan: "PRO"
     }
 
-    console.log(`📦 Team creation payload:`, JSON.stringify(payload, null, 2))
-
-    const response = await axios.post(TEAM_API_URL, payload, {
+    console.log(`🏢 Creating team "${teamName}" for user ${kindeId} in region ${currentRegion}`)
+    
+    const response = await axios.post(currentUrl, payload, {
       headers: {
-        'Authorization': TEAM_API_TOKEN,
+        'Authorization': authHeader,
         'Content-Type': 'application/json'
       },
-      timeout: 30000
+      timeout: 30000,
+      validateStatus: () => true
     })
 
-    console.log(`✅ Team created successfully:`)
-    console.log(`   - Status: ${response.status}`)
-    console.log(`   - Team ID: ${response.data.id || 'N/A'}`)
-    console.log(`   - Response data:`, JSON.stringify(response.data, null, 2))
-
-    return {
-      success: true,
-      teamId: response.data.id,
-      responseData: response.data
+    if (response.status >= 200 && response.status < 300) {
+      console.log(`✅ Team created successfully: ${response.data.id}`)
+      return {
+        success: true,
+        teamId: response.data.id,
+        responseData: response.data
+      }
+    } else {
+      // Better error handling
+      let errorMessage = `HTTP ${response.status}`
+      
+      if (response.data?.detail?.msg) {
+        errorMessage = response.data.detail.msg
+      } else if (response.data?.detail) {
+        if (typeof response.data.detail === 'string') {
+          errorMessage = response.data.detail
+        } else {
+          errorMessage = JSON.stringify(response.data.detail)
+        }
+      } else if (response.data?.message) {
+        errorMessage = response.data.message
+      }
+      
+      console.log(`❌ Team creation failed: ${response.status} - ${errorMessage}`)
+      console.log(`📊 Full response data:`, JSON.stringify(response.data, null, 2))
+      
+      return {
+        success: false,
+        error: errorMessage,
+        status: response.status,
+        responseData: response.data
+      }
     }
+
   } catch (error: any) {
-    console.error(`💥 Failed to create team:`)
-    console.error(`   - Kinde ID: ${kindeId}`)
-    console.error(`   - Team Name: ${teamName}`)
-    console.error(`   - Error: ${error.message}`)
+    console.log(`💥 Team creation error: ${error.message}`)
     
     if (error.response) {
-      console.error(`   - HTTP Status: ${error.response.status}`)
-      console.error(`   - Response Headers:`, error.response.headers)
-      console.error(`   - Response Data:`, JSON.stringify(error.response.data, null, 2))
-    } else if (error.request) {
-      console.error(`   - No response received`)
-      console.error(`   - Request:`, error.request)
+      let errorMessage = `HTTP ${error.response.status}`
+      
+      if (error.response.data?.detail?.msg) {
+        errorMessage = error.response.data.detail.msg
+      } else if (error.response.data?.detail) {
+        if (typeof error.response.data.detail === 'string') {
+          errorMessage = error.response.data.detail
+        } else {
+          errorMessage = JSON.stringify(error.response.data.detail)
+        }
+      } else if (error.response.data?.message) {
+        errorMessage = error.response.data.message
+      }
+      
+      console.log(`📊 Error response data:`, JSON.stringify(error.response.data, null, 2))
+      
+      return {
+        success: false,
+        error: errorMessage,
+        status: error.response.status,
+        responseData: error.response.data
+      }
     } else {
-      console.error(`   - Error setting up request:`, error.message)
-    }
-    
-    return {
-      success: false,
-      error: error.message,
-      status: error.response?.status,
-      responseData: error.response?.data
+      return {
+        success: false,
+        error: error.message,
+        status: 0
+      }
     }
   }
+}
+
+// Simple retry wrapper (optional)
+export async function createTeamWithRetry(kindeId: string, teamName: string, maxRetries: number = 2): Promise<TeamCreationResult> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const result = await createTeam(kindeId, teamName)
+    
+    if (result.success) {
+      return result
+    }
+    
+    // Don't retry on auth errors or user not found
+    if (result.status === 401 || result.status === 404) {
+      return result
+    }
+    
+    // Wait before retry (except on last attempt)
+    if (attempt < maxRetries) {
+      console.log(`⏳ Retrying in 3 seconds... (attempt ${attempt + 1}/${maxRetries})`)
+      await new Promise(resolve => setTimeout(resolve, 3000))
+    }
+  }
+  
+  // Return the last attempt result
+  return await createTeam(kindeId, teamName)
 }

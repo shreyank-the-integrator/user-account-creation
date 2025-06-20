@@ -44,7 +44,9 @@ export default function Home() {
     priceId: 'price_1R77HdDkAuZUHoK7l6ivkW2l',
     couponId: '8OrZ17Rm',
     startDate: '2025-06-15',
-    currency: 'cad'
+    currency: 'cad',
+    region: 'ca', // Default to Canada
+    includeTeamCreation: true // Default to both
   })
 
   const handleDataLoaded = (data: CustomerData[]) => {
@@ -86,7 +88,7 @@ export default function Home() {
         },
         body: JSON.stringify({ 
           customers: transformedData,
-          config: config // Send config with request
+          config: config // Send full config including region
         }),
       })
 
@@ -150,7 +152,7 @@ export default function Home() {
 
     const date = new Date().toISOString().split('T')[0]
     const time = new Date().toISOString().split('T')[1].split('.')[0].replace(/:/g, '-')
-    downloadCSV(reportData, `subscription_team_creation_${date}_${time}.csv`)
+    downloadCSV(reportData, `subscription_team_creation_${config.region}_${date}_${time}.csv`)
   }
 
   const getStatusIcon = (status: string) => {
@@ -196,6 +198,16 @@ export default function Home() {
   const partialSuccessCount = results.filter(r => r.status === 'team_creation_failed').length
   const failedCount = results.filter(r => r.status !== 'success' && r.status !== 'team_creation_failed').length
 
+  // Get region display name
+  const regionNames = {
+    ca: 'Canada',
+    us: 'United States', 
+    au: 'Australia',
+    eu: 'Europe',
+    uk: 'United Kingdom'
+  }
+  const currentRegionName = regionNames[config.region as keyof typeof regionNames] || config.region
+
   return (
     <div className="min-h-screen bg-background">
       <div className="container mx-auto px-4 py-8 max-w-6xl">
@@ -205,9 +217,15 @@ export default function Home() {
           <p className="text-muted-foreground text-lg">
             Create stripe customer accounts and teams for your users in bulk
           </p>
-          <div className="flex items-center justify-center gap-2 mt-2 text-sm text-muted-foreground">
-            <Terminal className="h-4 w-4" />
-            <span>Check browser console for detailed logs</span>
+          <div className="flex items-center justify-center gap-4 mt-3 text-sm text-muted-foreground">
+            <div className="flex items-center gap-2">
+              <Terminal className="h-4 w-4" />
+              <span>Check browser console for detailed logs</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Building className="h-4 w-4" />
+              <span>Region: {currentRegionName}</span>
+            </div>
           </div>
         </div>
 
@@ -239,7 +257,7 @@ export default function Home() {
                 <div>
                   <p className="text-lg font-semibold">{csvData.length} customers loaded</p>
                   <p className="text-sm text-muted-foreground">
-                    Ready to process subscriptions and create teams
+                    Ready to process {config.includeTeamCreation ? 'subscriptions and create teams' : 'subscriptions only'} in {currentRegionName}
                   </p>
                 </div>
                 <Button
@@ -280,7 +298,7 @@ export default function Home() {
             <CardHeader>
               <CardTitle>Processing Progress</CardTitle>
               <CardDescription>
-                Processing customers in batches of 10... Check console for detailed progress.
+                Processing customers in batches of 8 for {config.includeTeamCreation ? 'Stripe + Teams' : 'Stripe only'} in {currentRegionName}... Check console for detailed progress.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -300,19 +318,21 @@ export default function Home() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Building className="h-5 w-5" />
-                Processing Results
+                Processing Results ({config.includeTeamCreation ? `Stripe + Teams - ${currentRegionName}` : 'Stripe Only'})
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
                 <div className="text-center p-4 bg-green-50 dark:bg-green-950/30 rounded-lg border border-green-200 dark:border-green-800">
                   <div className="text-2xl font-bold text-green-600">{successCount}</div>
-                  <div className="text-sm text-green-600">Fully Successful</div>
+                  <div className="text-sm text-green-600">{config.includeTeamCreation ? 'Fully Successful' : 'Subscriptions Created'}</div>
                 </div>
-                <div className="text-center p-4 bg-yellow-50 dark:bg-yellow-950/30 rounded-lg border border-yellow-200 dark:border-yellow-800">
-                  <div className="text-2xl font-bold text-yellow-600">{partialSuccessCount}</div>
-                  <div className="text-sm text-yellow-600">Stripe Created, Team Failed</div>
-                </div>
+                {config.includeTeamCreation && (
+                  <div className="text-center p-4 bg-yellow-50 dark:bg-yellow-950/30 rounded-lg border border-yellow-200 dark:border-yellow-800">
+                    <div className="text-2xl font-bold text-yellow-600">{partialSuccessCount}</div>
+                    <div className="text-sm text-yellow-600">Stripe Created, Team Failed</div>
+                  </div>
+                )}
                 <div className="text-center p-4 bg-red-50 dark:bg-red-950/30 rounded-lg border border-red-200 dark:border-red-800">
                   <div className="text-2xl font-bold text-red-600">{failedCount}</div>
                   <div className="text-sm text-red-600">Failed</div>
