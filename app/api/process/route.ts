@@ -9,7 +9,7 @@ import {
   type CustomerData,
   type ProcessResult
 } from '@/lib/stripe-utils'
-import { createTeamWithRetry, setRegion } from '@/lib/team-api'
+import { createTeam, setRegion } from '@/lib/team-api'
 
 async function processCustomer(customer: CustomerData): Promise<ProcessResult> {
   const { kindeId, email, teamName } = customer
@@ -116,7 +116,7 @@ async function processTeamCreation(results: ProcessResult[]): Promise<ProcessRes
     console.log(`🏢 Creating teams for batch ${Math.floor(i/teamBatchSize) + 1} (${batch.length} teams)`)
     
     const teamPromises = batch.map(async (result) => {
-      const teamResult = await createTeamWithRetry(result.kindeId, result.teamName, 2)
+      const teamResult = await createTeam(result.kindeId, result.teamName)
       
       if (teamResult.success) {
         console.log(`✅ Team created: ${result.teamName}`)

@@ -139,28 +139,3 @@ export async function createTeam(kindeId: string, teamName: string): Promise<Tea
     }
   }
 }
-
-// Simple retry wrapper (optional)
-export async function createTeamWithRetry(kindeId: string, teamName: string, maxRetries: number = 2): Promise<TeamCreationResult> {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const result = await createTeam(kindeId, teamName)
-    
-    if (result.success) {
-      return result
-    }
-    
-    // Don't retry on auth errors or user not found
-    if (result.status === 401 || result.status === 404) {
-      return result
-    }
-    
-    // Wait before retry (except on last attempt)
-    if (attempt < maxRetries) {
-      console.log(`⏳ Retrying in 3 seconds... (attempt ${attempt + 1}/${maxRetries})`)
-      await new Promise(resolve => setTimeout(resolve, 3000))
-    }
-  }
-  
-  // Return the last attempt result
-  return await createTeam(kindeId, teamName)
-}
