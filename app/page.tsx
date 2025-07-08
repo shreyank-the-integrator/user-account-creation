@@ -6,7 +6,7 @@ import { ConfigPanel } from '@/components/ConfigPanel'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
-import { Play, Download, CheckCircle, XCircle, AlertTriangle, Users, Building, Terminal } from 'lucide-react'
+import { Play, Download, CheckCircle, XCircle, AlertTriangle, Users, Building, Terminal, CreditCard } from 'lucide-react'
 import { downloadCSV } from '@/lib/utils'
 
 interface CustomerData {
@@ -34,6 +34,13 @@ interface ProcessResult {
   teamResponseData?: any
 }
 
+interface TeamConfig {
+  isStripeManaged: boolean
+  chargeFutureMembers: boolean
+  allowToAddTeamMembers: boolean
+  subscribedPlan: 'FREE' | 'PRO' | 'PRO_PLUS' | 'ENTERPRISE'
+}
+
 export default function Home() {
   const [csvData, setCsvData] = useState<CustomerData[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
@@ -45,8 +52,14 @@ export default function Home() {
     couponId: '8OrZ17Rm',
     startDate: '2025-06-15',
     currency: 'cad',
-    region: 'ca', // Default to Canada
-    includeTeamCreation: true // Default to both
+    region: 'ca',
+    processingMode: 'both' as 'stripe_only' | 'teams_only' | 'both',
+    teamConfig: {
+      isStripeManaged: true,
+      chargeFutureMembers: true,
+      allowToAddTeamMembers: true,
+      subscribedPlan: 'PRO' as TeamConfig['subscribedPlan']
+    }
   })
 
   const handleDataLoaded = (data: CustomerData[]) => {
@@ -88,7 +101,7 @@ export default function Home() {
         },
         body: JSON.stringify({ 
           customers: transformedData,
-          config: config // Send full config including region
+          config: config
         }),
       })
 
@@ -152,7 +165,9 @@ export default function Home() {
 
     const date = new Date().toISOString().split('T')[0]
     const time = new Date().toISOString().split('T')[1].split('.')[0].replace(/:/g, '-')
-    downloadCSV(reportData, `subscription_team_creation_${config.region}_${date}_${time}.csv`)
+    const modePrefix = config.processingMode === 'stripe_only' ? 'stripe' : 
+                      config.processingMode === 'teams_only' ? 'teams' : 'full'
+    downloadCSV(reportData, `${modePrefix}_processing_${config.region}_${date}_${time}.csv`)
   }
 
   const getStatusIcon = (status: string) => {
@@ -208,6 +223,20 @@ export default function Home() {
   }
   const currentRegionName = regionNames[config.region as keyof typeof regionNames] || config.region
 
+  // Get processing mode display
+  const getProcessingModeDisplay = () => {
+    switch (config.processingMode) {
+      case 'stripe_only':
+        return { icon: CreditCard, text: 'Stripe Only', description: 'Creating subscriptions only' }
+      case 'teams_only':
+        return { icon: Building, text: 'Teams Only', description: 'Creating teams only' }
+      case 'both':
+        return { icon: Users, text: 'Stripe + Teams', description: 'Full processing' }
+    }
+  }
+
+  const processingModeDisplay = getProcessingModeDisplay()
+
   return (
     <div className="min-h-screen bg-background">
       <div className="container mx-auto px-4 py-8 max-w-6xl">
@@ -223,8 +252,8 @@ export default function Home() {
               <span>Check browser console for detailed logs</span>
             </div>
             <div className="flex items-center gap-2">
-              <Building className="h-4 w-4" />
-              <span>Region: {currentRegionName}</span>
+              <processingModeDisplay.icon className="h-4 w-4" />
+              <span>{processingModeDisplay.text} | {currentRegionName}</span>
             </div>
           </div>
         </div>
@@ -248,7 +277,7 @@ export default function Home() {
           <Card className="mb-8">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <Users className="h-5 w-5" />
+                <processingModeDisplay.icon className="h-5 w-5" />
                 Data Summary
               </CardTitle>
             </CardHeader>
@@ -257,8 +286,15 @@ export default function Home() {
                 <div>
                   <p className="text-lg font-semibold">{csvData.length} customers loaded</p>
                   <p className="text-sm text-muted-foreground">
-                    Ready to process {config.includeTeamCreation ? 'subscriptions and create teams' : 'subscriptions only'} in {currentRegionName}
+                    Ready to process: {processingModeDisplay.description} in {currentRegionName}
                   </p>
+                  {config.processingMode !== 'stripe_only' && (
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Team plan: {config.teamConfig.subscribedPlan} | 
+                      Stripe managed: {config.teamConfig.isStripeManaged ? 'Yes' : 'No'} | 
+                      Auto-charge: {config.teamConfig.chargeFutureMembers ? 'Yes' : 'No'}
+                    </p>
+                  )}
                 </div>
                 <Button
                   onClick={handleStartProcessing}
@@ -298,7 +334,7 @@ export default function Home() {
             <CardHeader>
               <CardTitle>Processing Progress</CardTitle>
               <CardDescription>
-                Processing customers in batches of 8 for {config.includeTeamCreation ? 'Stripe + Teams' : 'Stripe only'} in {currentRegionName}... Check console for detailed progress.
+                Processing customers in batches for {processingModeDisplay.text.toLowerCase()} in {currentRegionName}... Check console for detailed progress.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -317,17 +353,20 @@ export default function Home() {
           <Card className="mb-8">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <Building className="h-5 w-5" />
-                Processing Results ({config.includeTeamCreation ? `Stripe + Teams - ${currentRegionName}` : 'Stripe Only'})
+                <processingModeDisplay.icon className="h-5 w-5" />
+                Processing Results ({processingModeDisplay.text} - {currentRegionName})
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
                 <div className="text-center p-4 bg-green-50 dark:bg-green-950/30 rounded-lg border border-green-200 dark:border-green-800">
                   <div className="text-2xl font-bold text-green-600">{successCount}</div>
-                  <div className="text-sm text-green-600">{config.includeTeamCreation ? 'Fully Successful' : 'Subscriptions Created'}</div>
+                  <div className="text-sm text-green-600">
+                    {config.processingMode === 'teams_only' ? 'Teams Created' : 
+                     config.processingMode === 'stripe_only' ? 'Subscriptions Created' : 'Fully Successful'}
+                  </div>
                 </div>
-                {config.includeTeamCreation && (
+                {config.processingMode === 'both' && (
                   <div className="text-center p-4 bg-yellow-50 dark:bg-yellow-950/30 rounded-lg border border-yellow-200 dark:border-yellow-800">
                     <div className="text-2xl font-bold text-yellow-600">{partialSuccessCount}</div>
                     <div className="text-sm text-yellow-600">Stripe Created, Team Failed</div>

@@ -19,8 +19,21 @@ export interface TeamCreationResult {
   responseData?: any
 }
 
+export interface TeamConfig {
+  isStripeManaged: boolean
+  chargeFutureMembers: boolean
+  allowToAddTeamMembers: boolean
+  subscribedPlan: 'FREE' | 'PRO' | 'PRO_PLUS' | 'ENTERPRISE'
+}
+
 // Dynamic region configuration
 let currentRegion = 'ca' // Default to Canada
+let teamConfig: TeamConfig = {
+  isStripeManaged: true,
+  chargeFutureMembers: true,
+  allowToAddTeamMembers: true,
+  subscribedPlan: 'PRO'
+}
 
 export function setRegion(region: string) {
   if (region in REGION_URLS) {
@@ -29,6 +42,11 @@ export function setRegion(region: string) {
   } else {
     console.error(`❌ Invalid region: ${region}. Valid regions: ${Object.keys(REGION_URLS).join(', ')}`)
   }
+}
+
+export function setTeamConfig(config: TeamConfig) {
+  teamConfig = { ...config }
+  console.log(`⚙️ Team config updated:`, teamConfig)
 }
 
 export function getCurrentRegionUrl(): string {
@@ -52,14 +70,15 @@ export async function createTeam(kindeId: string, teamName: string): Promise<Tea
       owner_kinde_id: kindeId,
       team_name: teamName,
       admin_session_review_toggle: false,
-      allow_to_add_team_members: true,
-      charge_future_members: true,
+      allow_to_add_team_members: teamConfig.allowToAddTeamMembers,
+      charge_future_members: teamConfig.chargeFutureMembers,
       is_pilot: false,
-      is_stripe_managed: true,
-      subscribed_plan: "PRO"
+      is_stripe_managed: teamConfig.isStripeManaged,
+      subscribed_plan: teamConfig.subscribedPlan
     }
 
     console.log(`🏢 Creating team "${teamName}" for user ${kindeId} in region ${currentRegion}`)
+    console.log(`📋 Team config: Stripe managed: ${teamConfig.isStripeManaged}, Charge future: ${teamConfig.chargeFutureMembers}, Allow add members: ${teamConfig.allowToAddTeamMembers}, Plan: ${teamConfig.subscribedPlan}`)
     
     const response = await axios.post(currentUrl, payload, {
       headers: {
